@@ -1,8 +1,21 @@
-const pool = require('../config/db');
+const Category = require('../models/Category');
+const Document = require('../models/Document');
+
+// @desc    Get all Categories
+// @route   GET /api/categories
+// @access  Public / Private
+const getCategories = async (req, res, next) => {
+    try {
+        const categories = await Category.find().sort({ category_name: 1 });
+        res.json(categories.map((c) => ({ id: c._id.toString(), category_name: c.category_name })));
+    } catch (error) {
+        next(error);
+    }
+};
 
 // @desc    Add a Category
 // @route   POST /api/categories
-// @access  Private (Could be Admin-only in robust systems, set private for simplicity)
+// @access  Private / Admin
 const addCategory = async (req, res, next) => {
     try {
         const { category_name } = req.body;
@@ -11,9 +24,8 @@ const addCategory = async (req, res, next) => {
             throw new Error('Category name is required');
         }
 
-        const [result] = await pool.execute('INSERT INTO Categories (category_name) VALUES (?)', [category_name]);
-        
-        res.status(201).json({ id: result.insertId, category_name });
+        const category = await Category.create({ category_name: category_name.trim() });
+        res.status(201).json({ id: category._id.toString(), category_name: category.category_name });
     } catch (error) {
         next(error);
     }
@@ -27,13 +39,22 @@ const assignCategory = async (req, res, next) => {
         const { document_id, category_id } = req.body;
 
         // Check if user owns document
-        const [docs] = await pool.execute('SELECT id FROM Documents WHERE id = ? AND user_id = ?', [document_id, req.user.id]);
-        if (docs.length === 0) {
+        const doc = await Document.findOne({ _id: document_id, user: req.user._id });
+        if (!doc) {
             res.status(401);
             throw new Error('Document unauthorized or does not exist');
         }
 
-        await pool.execute('INSERT INTO Document_Category (document_id, category_id) VALUES (?, ?)', [document_id, category_id]);
+        // Verify category exists
+        const cat = await Category.findById(category_id);
+        if (!cat) {
+            res.status(404);
+            throw new Error('Category does not exist');
+        }
+
+        await Document.findByIdAndUpdate(document_id, {
+            $addToSet: { categories: category_id },
+        });
 
         res.status(201).json({ message: 'Category assigned successfully' });
     } catch (error) {
@@ -46,23 +67,28 @@ const assignCategory = async (req, res, next) => {
 // @access  Private
 const getDocumentsByCategory = async (req, res, next) => {
     try {
-        const categoryId = req.params.categoryId;
-        const [documents] = await pool.execute(`
-            SELECT d.id, d.file_name, d.file_path, c.category_name 
-            FROM Documents d
-            JOIN Document_Category dc ON d.id = dc.document_id
-            JOIN Categories c ON dc.category_id = c.id
-            WHERE d.user_id = ? AND c.id = ?
-        `, [req.user.id, categoryId]);
+        const { categoryId } = req.params;
+        const documents = await Document.find({
+            user: req.user._id,
+            categories: categoryId,
+        }).populate('categories', 'category_name');
 
-        res.json(documents);
+        const formattedDocs = documents.map((d) => ({
+            id: d._id.toString(),
+            file_name: d.file_name,
+            file_path: d.file_path,
+            category_name: d.categories?.[0]?.category_name || '',
+        }));
+
+        res.json(formattedDocs);
     } catch (error) {
         next(error);
     }
 };
 
 module.exports = {
+    getCategories,
     addCategory,
     assignCategory,
-    getDocumentsByCategory
+    getDocumentsByCategory,
 };

@@ -1,6 +1,6 @@
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const pool = require('../config/db');
+const User = require('../models/User');
 
 // Generate JWT
 const generateToken = (id) => {
@@ -22,8 +22,8 @@ const registerUser = async (req, res, next) => {
         }
 
         // Check if user exists
-        const [existingUsers] = await pool.execute('SELECT email FROM Users WHERE email = ?', [email]);
-        if (existingUsers.length > 0) {
+        const userExists = await User.findOne({ email: email.toLowerCase().trim() });
+        if (userExists) {
             res.status(400);
             throw new Error('User already exists');
         }
@@ -32,18 +32,19 @@ const registerUser = async (req, res, next) => {
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
 
-        // Create user
-        const [result] = await pool.execute(
-            'INSERT INTO Users (name, email, password) VALUES (?, ?, ?)',
-            [name, email, hashedPassword]
-        );
+        // Create user in MongoDB
+        const user = await User.create({
+            name,
+            email: email.toLowerCase().trim(),
+            password: hashedPassword,
+        });
 
-        if (result.insertId) {
+        if (user) {
             res.status(201).json({
-                id: result.insertId,
-                name,
-                email,
-                token: generateToken(result.insertId)
+                id: user._id.toString(),
+                name: user.name,
+                email: user.email,
+                token: generateToken(user._id.toString()),
             });
         } else {
             res.status(400);
@@ -61,15 +62,14 @@ const loginUser = async (req, res, next) => {
     try {
         const { email, password } = req.body;
 
-        const [users] = await pool.execute('SELECT * FROM Users WHERE email = ?', [email]);
-        const user = users[0];
+        const user = await User.findOne({ email: email.toLowerCase().trim() });
 
         if (user && (await bcrypt.compare(password, user.password))) {
             res.json({
-                id: user.id,
+                id: user._id.toString(),
                 name: user.name,
                 email: user.email,
-                token: generateToken(user.id)
+                token: generateToken(user._id.toString()),
             });
         } else {
             res.status(401);
@@ -82,5 +82,5 @@ const loginUser = async (req, res, next) => {
 
 module.exports = {
     registerUser,
-    loginUser
+    loginUser,
 };

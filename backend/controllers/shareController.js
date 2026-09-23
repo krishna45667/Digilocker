@@ -1,4 +1,6 @@
-const pool = require('../config/db');
+const SharedDocument = require('../models/SharedDocument');
+const Document = require('../models/Document');
+const User = require('../models/User');
 
 // @desc    Share Document
 // @route   POST /api/share
@@ -7,28 +9,41 @@ const shareDocument = async (req, res, next) => {
     try {
         const { document_id, shared_with_email, permission_type } = req.body;
 
-        // Find user_id by email
-        const [users] = await pool.execute('SELECT id FROM Users WHERE email = ?', [shared_with_email]);
-        if (users.length === 0) {
+        if (!document_id || !shared_with_email) {
+            res.status(400);
+            throw new Error('Please provide document_id and shared_with_email');
+        }
+
+        // Find recipient user by email
+        const targetUser = await User.findOne({ email: shared_with_email.toLowerCase().trim() });
+        if (!targetUser) {
             res.status(404);
             throw new Error('User to share with not found');
         }
-        const sharedWithUserId = users[0].id;
 
-        // Ensure request user owns document
-        const [docs] = await pool.execute('SELECT id FROM Documents WHERE id = ? AND user_id = ?', [document_id, req.user.id]);
-        if (docs.length === 0) {
+        if (targetUser._id.toString() === req.user._id.toString()) {
+            res.status(400);
+            throw new Error('You cannot share a document with yourself');
+        }
+
+        // Ensure requesting user owns the document
+        const doc = await Document.findOne({ _id: document_id, user: req.user._id });
+        if (!doc) {
             res.status(401);
             throw new Error('Document unauthorized or does not exist');
         }
 
-        // Insert share
-        const [result] = await pool.execute(
-            'INSERT INTO Shared_Documents (document_id, shared_with_user_id, permission_type) VALUES (?, ?, ?)',
-            [document_id, sharedWithUserId, permission_type || 'VIEW']
+        // Upsert or create share record
+        const share = await SharedDocument.findOneAndUpdate(
+            { document: document_id, shared_with_user: targetUser._id },
+            { permission_type: permission_type || 'VIEW', shared_at: new Date() },
+            { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
         );
 
-        res.status(201).json({ message: 'Document shared successfully', share_id: result.insertId });
+        res.status(201).json({
+            message: 'Document shared successfully',
+            share_id: share._id.toString(),
+        });
     } catch (error) {
         next(error);
     }
@@ -39,15 +54,32 @@ const shareDocument = async (req, res, next) => {
 // @access  Private
 const getSharedDocuments = async (req, res, next) => {
     try {
-        const [sharedDocs] = await pool.execute(`
-            SELECT sd.id as share_id, d.file_name, d.file_path, u.name as owner_name, sd.permission_type, sd.shared_at
-            FROM Shared_Documents sd
-            JOIN Documents d ON sd.document_id = d.id
-            JOIN Users u ON d.user_id = u.id
-            WHERE sd.shared_with_user_id = ?
-        `, [req.user.id]);
+        const sharedDocs = await SharedDocument.find({ shared_with_user: req.user._id })
+            .populate({
+                path: 'document',
+                populate: {
+                    path: 'user',
+                    select: 'name email',
+                },
+            })
+            .sort({ createdAt: -1 });
 
-        res.json(sharedDocs);
+        // Filter out records where underlying document may have been deleted
+        const formatted = sharedDocs
+            .filter((sd) => sd.document && sd.document.user)
+            .map((sd) => ({
+                share_id: sd._id.toString(),
+                id: sd._id.toString(),
+                file_name: sd.document.file_name,
+                file_path: sd.document.file_path,
+                file_type: sd.document.file_type,
+                owner_name: sd.document.user.name,
+                owner_email: sd.document.user.email,
+                permission_type: sd.permission_type,
+                shared_at: sd.shared_at || sd.createdAt,
+            }));
+
+        res.json(formatted);
     } catch (error) {
         next(error);
     }
@@ -55,5 +87,5 @@ const getSharedDocuments = async (req, res, next) => {
 
 module.exports = {
     shareDocument,
-    getSharedDocuments
+    getSharedDocuments,
 };

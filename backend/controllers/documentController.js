@@ -1,4 +1,5 @@
-const pool = require('../config/db');
+const Document = require('../models/Document');
+const SharedDocument = require('../models/SharedDocument');
 const fs = require('fs');
 const path = require('path');
 
@@ -12,22 +13,35 @@ const uploadDocument = async (req, res, next) => {
             throw new Error('Please upload a file');
         }
 
-        const userId = req.user.id;
+        const userId = req.user._id;
         const fileName = req.body.fileName || req.file.originalname;
         const fileType = req.file.mimetype;
-        const filePath = req.file.path; // e.g., 'uploads/file-12345.pdf'
+        const filePath = req.file.path.replace(/\\/g, '/'); // normalize path separators for web
         const fileSize = req.file.size;
+        const categoryId = req.body.category_id || req.body.categoryId;
 
-        const [result] = await pool.execute(
-            'INSERT INTO Documents (user_id, file_name, file_type, file_path, file_size) VALUES (?, ?, ?, ?, ?)',
-            [userId, fileName, fileType, filePath, fileSize]
-        );
+        const docData = {
+            user: userId,
+            file_name: fileName,
+            file_type: fileType,
+            file_path: filePath,
+            file_size: fileSize,
+        };
+
+        if (categoryId) {
+            docData.categories = [categoryId];
+        }
+
+        const doc = await Document.create(docData);
 
         res.status(201).json({
-            id: result.insertId,
-            user_id: userId,
-            file_name: fileName,
-            file_path: filePath
+            id: doc._id.toString(),
+            user_id: userId.toString(),
+            file_name: doc.file_name,
+            file_path: doc.file_path,
+            file_type: doc.file_type,
+            file_size: doc.file_size,
+            upload_date: doc.upload_date,
         });
     } catch (error) {
         next(error);
@@ -39,11 +53,21 @@ const uploadDocument = async (req, res, next) => {
 // @access  Private
 const getDocuments = async (req, res, next) => {
     try {
-        const [documents] = await pool.execute(
-            'SELECT id, file_name, file_type, file_path, file_size, upload_date FROM Documents WHERE user_id = ?',
-            [req.user.id]
-        );
-        res.json(documents);
+        const documents = await Document.find({ user: req.user._id })
+            .populate('categories', 'category_name')
+            .sort({ createdAt: -1 });
+
+        const formattedDocs = documents.map((doc) => ({
+            id: doc._id.toString(),
+            file_name: doc.file_name,
+            file_type: doc.file_type,
+            file_path: doc.file_path,
+            file_size: doc.file_size,
+            upload_date: doc.upload_date || doc.createdAt,
+            category_name: doc.categories && doc.categories.length > 0 ? doc.categories[0].category_name : '',
+        }));
+
+        res.json(formattedDocs);
     } catch (error) {
         next(error);
     }
@@ -57,19 +81,20 @@ const deleteDocument = async (req, res, next) => {
         const docId = req.params.id;
 
         // Ensure user owns document
-        const [docs] = await pool.execute('SELECT file_path FROM Documents WHERE id = ? AND user_id = ?', [docId, req.user.id]);
-        if (docs.length === 0) {
+        const doc = await Document.findOne({ _id: docId, user: req.user._id });
+        if (!doc) {
             res.status(404);
             throw new Error('Document not found or unauthorized');
         }
 
-        const filePath = docs[0].file_path;
-
         // Delete from database
-        await pool.execute('DELETE FROM Documents WHERE id = ?', [docId]);
+        await Document.findByIdAndDelete(docId);
+
+        // Cascade delete shared documents associated with this document (NoSQL cascade)
+        await SharedDocument.deleteMany({ document: docId });
 
         // Remove from local filesystem
-        const fullPath = path.join(__dirname, '..', filePath);
+        const fullPath = path.join(__dirname, '..', doc.file_path);
         if (fs.existsSync(fullPath)) {
             fs.unlinkSync(fullPath);
         }
@@ -93,14 +118,17 @@ const updateDocument = async (req, res, next) => {
             throw new Error('Please provide a new file name');
         }
 
-        // Ensure ownership
-        const [docs] = await pool.execute('SELECT id FROM Documents WHERE id = ? AND user_id = ?', [docId, req.user.id]);
-        if (docs.length === 0) {
+        // Ensure ownership and update
+        const doc = await Document.findOneAndUpdate(
+            { _id: docId, user: req.user._id },
+            { file_name: file_name.trim() },
+            { returnDocument: 'after' }
+        );
+
+        if (!doc) {
             res.status(404);
             throw new Error('Document not found or unauthorized');
         }
-
-        await pool.execute('UPDATE Documents SET file_name = ? WHERE id = ?', [file_name, docId]);
 
         res.json({ message: 'Document updated successfully', id: docId });
     } catch (error) {
@@ -112,5 +140,5 @@ module.exports = {
     uploadDocument,
     getDocuments,
     deleteDocument,
-    updateDocument
+    updateDocument,
 };

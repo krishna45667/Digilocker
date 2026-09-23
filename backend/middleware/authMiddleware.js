@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const pool = require('../config/db');
+const User = require('../models/User');
 
 // Protect routes by ensuring correct JWT is provided
 const protect = async (req, res, next) => {
@@ -14,17 +14,17 @@ const protect = async (req, res, next) => {
             const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
             // Get user from the database
-            const [users] = await pool.execute('SELECT id, name, email, created_at FROM Users WHERE id = ?', [decoded.id]);
+            const user = await User.findById(decoded.id).select('-password');
             
-            if (users.length === 0) {
+            if (!user) {
                 return res.status(401).json({ message: 'Not authorized, user not found' });
             }
 
             // Assign user to request object
-            req.user = users[0];
+            req.user = user;
             next();
         } catch (error) {
-            console.error(error);
+            console.error('[AuthMiddleware] Error:', error.message);
             res.status(401).json({ message: 'Not authorized, token failed' });
         }
     } else {
